@@ -49,7 +49,7 @@ void print_universe(int N, char *universe)
 }
 
 // 核心计算代码，将世界向前推进T个时刻
-void life3d_run(int N, char *universe, int T)
+void life3d_run_cpu(int N, char *universe, int T)
 {
     char *next = (char *)malloc(N * N * N);
     for (int t = 0; t < T; t++)
@@ -82,6 +82,69 @@ void life3d_run(int N, char *universe, int T)
         memcpy(universe, next, N * N * N);
     }
     free(next);
+}
+
+// CUDA核函数
+__global__ void life3d_kernel(int N, char *universe, char *next) {
+    // 计算线程负责得点坐标
+    int x = blockIdx.x + blockDim.x + threadIdx.x;
+    int y = blockIdx.y + blockDim.y + threadIdx.y;
+    int z = blockIdx.z + blockDim.z + threadIdx.z;
+
+    if (x >= N || y >= N || z >= N) return;
+
+    int alive = 0;
+
+    for (int dx = -1; dx <= 1; dx++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dy == 0 && dz ==0) continue;
+
+                int nx = (x + dx + N) % N;
+                int ny = (y + dy + N) % N;
+                int nz = (z + dz + N) % N;
+
+                alive += universe[nx * N * N + ny * y + nz];
+            }
+        }
+    }
+
+
+    int index = x * N * N + y * N + z;
+    if (universe[index] && (alive < 5 || alive > 7)) next[index] = 0;
+    else if (!universe[index] && alive == 6) next[index] = 1;
+    else next[index] = universe[index];
+
+}
+
+void life3d_run_gpu(int N, char *universe, int T) {
+    char *d_universe, *d_next;
+
+    // 分配GPU内存
+    cudaMalloc((void **)&d_universe, N * N * N * sizeof(char));
+    cudaMalloc((void **)&d_next, N * N * N * sizeof(char));
+
+    // 在GPU上初始化数据
+    cudaMemcpy(d_universe, universe, N * N * N * sizeof(char), cudaMemcpyHostToDevice);
+
+    // 定义线程块和网络维度
+    int threadPerBlock = 8;
+    dim3 blockDim(threadPerBlock, threadPerBlock, threadPerBlock);
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
+                 (N + blockDim.y - 1) / blockDim.y,
+                 (N + blockDim.z - 1) / blockDim.z);
+
+    for (int t = 0; t < T; t++) {
+        life3d_kernel<<<gridDim, blockDim>>>(N, d_universe, d_next);
+
+        char *temp = d_universe;
+        d_universe = d_next;
+        d_next = temp;
+    }
+    cudaMemcpy(universe, d_universe, N * N * N * sizeof(char), cudaMemcpyDeviceToHost);
+
+    cudaFree(d_universe);
+    cudaFree(d_next);
 }
 
 // 读取输入文件
@@ -134,7 +197,7 @@ int main(int argc, char **argv)
 
     int start_pop = population(N, universe);
     auto start_time = std::chrono::high_resolution_clock::now();
-    life3d_run(N, universe, T);
+    life3d_run_gpu(N, universe, T);
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> duration = end_time - start_time;
     int final_pop = population(N, universe);
